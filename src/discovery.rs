@@ -188,10 +188,14 @@ pub async fn fetch_discovery_document(
     service: &str,
     version: &str,
 ) -> anyhow::Result<RestDescription> {
-    let cache_dir = dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("gws")
-        .join("cache");
+    // Validate service and version to prevent path traversal in cache filenames
+    // and injection in discovery URLs.
+    let service =
+        crate::validate::validate_api_identifier(service).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let version =
+        crate::validate::validate_api_identifier(version).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let cache_dir = crate::auth_commands::config_dir().join("cache");
     std::fs::create_dir_all(&cache_dir)?;
 
     let cache_file = cache_dir.join(format!("{service}_{version}.json"));
@@ -209,7 +213,11 @@ pub async fn fetch_discovery_document(
         }
     }
 
-    let url = format!("https://www.googleapis.com/discovery/v1/apis/{service}/{version}/rest");
+    let url = format!(
+        "https://www.googleapis.com/discovery/v1/apis/{}/{}/rest",
+        crate::validate::encode_path_segment(service),
+        crate::validate::encode_path_segment(version),
+    );
 
     let client = crate::client::build_client()?;
     let resp = client.get(&url).send().await?;
@@ -218,8 +226,12 @@ pub async fn fetch_discovery_document(
         resp.text().await?
     } else {
         // Try the $discovery/rest URL pattern used by newer APIs (Forms, Keep, Meet, etc.)
-        let alt_url = format!("https://{service}.googleapis.com/$discovery/rest?version={version}");
-        let alt_resp = client.get(&alt_url).send().await?;
+        let alt_url = format!("https://{service}.googleapis.com/$discovery/rest");
+        let alt_resp = client
+            .get(&alt_url)
+            .query(&[("version", version)])
+            .send()
+            .await?;
         if !alt_resp.status().is_success() {
             anyhow::bail!(
                 "Failed to fetch Discovery Document for {service}/{version}: HTTP {} (tried both standard and $discovery URLs)",

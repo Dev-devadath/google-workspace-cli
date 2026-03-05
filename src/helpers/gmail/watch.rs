@@ -14,10 +14,10 @@ pub(super) async fn handle_watch(
     let client = crate::client::build_client()?;
 
     // Get tokens
-    let gmail_token = auth::get_token(&[GMAIL_SCOPE])
+    let gmail_token = auth::get_token(&[GMAIL_SCOPE], None)
         .await
         .context("Failed to get Gmail token")?;
-    let pubsub_token = auth::get_token(&[PUBSUB_SCOPE])
+    let pubsub_token = auth::get_token(&[PUBSUB_SCOPE], None)
         .await
         .context("Failed to get Pub/Sub token")?;
 
@@ -385,13 +385,12 @@ async fn fetch_and_output_messages(
     output_dir: Option<&std::path::PathBuf>,
     sanitize_config: &crate::helpers::modelarmor::SanitizeConfig,
 ) -> Result<(), GwsError> {
-    let url = format!(
-        "https://gmail.googleapis.com/gmail/v1/users/me/history?startHistoryId={}&historyTypes=messageAdded",
-        start_history_id
-    );
-
     let resp = client
-        .get(&url)
+        .get("https://gmail.googleapis.com/gmail/v1/users/me/history")
+        .query(&[
+            ("startHistoryId", &start_history_id.to_string()),
+            ("historyTypes", &"messageAdded".to_string()),
+        ])
         .bearer_auth(gmail_token)
         .send()
         .await
@@ -404,10 +403,15 @@ async fn fetch_and_output_messages(
     for msg_id in msg_ids {
         // Fetch full message
         let msg_url = format!(
-            "https://gmail.googleapis.com/gmail/v1/users/me/messages/{}?format={}",
-            msg_id, msg_format
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/{}",
+            crate::validate::encode_path_segment(&msg_id),
         );
-        let msg_resp = client.get(&msg_url).bearer_auth(gmail_token).send().await;
+        let msg_resp = client
+            .get(&msg_url)
+            .query(&[("format", msg_format)])
+            .bearer_auth(gmail_token)
+            .send()
+            .await;
 
         if let Ok(resp) = msg_resp {
             if let Ok(mut full_msg) = resp.json::<Value>().await {

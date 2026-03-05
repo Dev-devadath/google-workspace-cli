@@ -285,12 +285,13 @@ pub async fn fetch_scopes_for_apis(enabled_api_ids: &[String]) -> Vec<Discovered
                         if !url.starts_with("https://www.googleapis.com/auth/") {
                             continue;
                         }
-                        // Filter out app-only scopes that can't be used with user OAuth consent
-                        // (they require a Chat app / service account)
+                        // Filter out scopes that can't be used with user OAuth consent
+                        // (they require a Chat app, service account, or domain-wide delegation)
                         if url.contains("/auth/chat.app.")
                             || url.contains("/auth/chat.bot")
                             || url.contains("/auth/chat.import")
                             || url.contains("/auth/keep")
+                            || url.contains("/auth/apps.alerts")
                         {
                             continue;
                         }
@@ -398,17 +399,28 @@ pub fn parse_setup_args(args: &[String]) -> SetupOptions {
 
 // ── gcloud helpers ──────────────────────────────────────────────
 
+/// Returns the gcloud executable name for the current platform.
+/// On Windows, gcloud is installed as `gcloud.cmd` which Rust's
+/// `Command` cannot find without the extension.
+fn gcloud_bin() -> &'static str {
+    if cfg!(windows) {
+        "gcloud.cmd"
+    } else {
+        "gcloud"
+    }
+}
+
 /// Create a gcloud Command with interactive prompts disabled.
 /// This prevents CBA proxy install prompts from blocking subprocess calls.
 fn gcloud_cmd() -> Command {
-    let mut cmd = Command::new("gcloud");
+    let mut cmd = Command::new(gcloud_bin());
     cmd.env("CLOUDSDK_CORE_DISABLE_PROMPTS", "1");
     cmd
 }
 
 /// Check if gcloud CLI is installed.
 pub fn is_gcloud_installed() -> bool {
-    Command::new("gcloud")
+    Command::new(gcloud_bin())
         .arg("version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -545,6 +557,16 @@ fn list_gcloud_projects() -> (Vec<(String, String)>, Option<String>) {
         Err(e) => return (Vec::new(), Some(format!("Failed to run gcloud: {e}"))),
     };
 
+    // Drain stdout in a background thread to prevent pipe buffer deadlock.
+    // Without this, gcloud blocks once the OS pipe buffer (~64 KB) fills up,
+    // and the parent blocks waiting for gcloud to exit — a classic deadlock.
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let reader_handle = std::thread::spawn(move || {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut { stdout }, &mut buf).ok();
+        buf
+    });
+
     // Wait with timeout
     let timeout = std::time::Duration::from_secs(10);
     let start = std::time::Instant::now();
@@ -552,15 +574,7 @@ fn list_gcloud_projects() -> (Vec<(String, String)>, Option<String>) {
         match child.try_wait() {
             Ok(Some(status)) => {
                 if status.success() {
-                    let stdout = child
-                        .stdout
-                        .take()
-                        .map(|mut s| {
-                            let mut buf = String::new();
-                            std::io::Read::read_to_string(&mut s, &mut buf).ok();
-                            buf
-                        })
-                        .unwrap_or_default();
+                    let stdout = reader_handle.join().unwrap_or_default();
                     let projects = stdout
                         .lines()
                         .filter_map(|line| {
@@ -647,7 +661,7 @@ async fn enable_apis(
         .map(|api_id| {
             let project_id = project_id.to_string();
             async move {
-                let result = tokio::process::Command::new("gcloud")
+                let result = tokio::process::Command::new(gcloud_bin())
                     .env("CLOUDSDK_CORE_DISABLE_PROMPTS", "1")
                     .args(["services", "enable", &api_id, "--project", &project_id])
                     .stdout(std::process::Stdio::null())
@@ -989,14 +1003,24 @@ fn stage_project(ctx: &mut SetupContext) -> Result<SetupStage, GwsError> {
         }
         let current = get_gcloud_project()?.unwrap_or_default();
 
-        let mut items: Vec<SelectItem> = vec![SelectItem {
-            label: "➕ Create new project".to_string(),
-            description: "Create a new GCP project for gws".to_string(),
-            selected: false,
-            is_fixed: false,
-            is_template: false,
-            template_selects: vec![],
-        }];
+        let mut items: Vec<SelectItem> = vec![
+            SelectItem {
+                label: "➕ Create new project".to_string(),
+                description: "Create a new GCP project for gws".to_string(),
+                selected: false,
+                is_fixed: false,
+                is_template: false,
+                template_selects: vec![],
+            },
+            SelectItem {
+                label: "⌨ Enter project ID manually".to_string(),
+                description: "Use an existing project ID you already know".to_string(),
+                selected: false,
+                is_fixed: false,
+                is_template: false,
+                template_selects: vec![],
+            },
+        ];
         items.extend(projects.iter().map(|(id, name)| SelectItem {
             label: id.clone(),
             description: name.clone(),
@@ -1059,6 +1083,30 @@ fn stage_project(ctx: &mut SetupContext) -> Result<SetupStage, GwsError> {
                         set_gcloud_project(&project_name)?;
                         ctx.wiz(2, StepStatus::Done(project_name.clone()));
                         ctx.project_id = project_name;
+                        Ok(SetupStage::EnableApis)
+                    }
+                    Some(item) if item.label.starts_with('⌨') => {
+                        let project_id = match ctx
+                            .wizard
+                            .as_mut()
+                            .unwrap()
+                            .show_input(
+                                "Enter GCP project ID",
+                                "Type your existing project ID",
+                                None,
+                            )
+                            .map_err(|e| GwsError::Validation(format!("TUI error: {e}")))?
+                        {
+                            crate::setup_tui::InputResult::Confirmed(v) if !v.is_empty() => v,
+                            _ => {
+                                return Err(GwsError::Validation(
+                                    "Project entry cancelled by user".to_string(),
+                                ))
+                            }
+                        };
+                        set_gcloud_project(&project_id)?;
+                        ctx.wiz(2, StepStatus::Done(project_id.clone()));
+                        ctx.project_id = project_id;
                         Ok(SetupStage::EnableApis)
                     }
                     Some(item) => {
@@ -1259,7 +1307,7 @@ fn manual_oauth_instructions(project_id: &str) -> String {
             "     gws auth login\n\n",
             "   Option B — Download the JSON file:\n",
             "     Download 'client_secret_*.json' from the Cloud Console dialog\n",
-            "     and save it to: ~/.config/gws/client_secret.json\n",
+            "     and save it to: {config_path}\n",
             "     Then run: gws auth login\n\n",
             "   Option C — Re-run setup interactively (recommended for first-time setup):\n",
             "     gws auth setup\n\n",
@@ -1267,7 +1315,8 @@ fn manual_oauth_instructions(project_id: &str) -> String {
             "Desktop app clients do not require you to register a redirect URI manually."
         ),
         consent_url = consent_url,
-        creds_url = creds_url
+        creds_url = creds_url,
+        config_path = crate::oauth_config::client_config_path().display()
     )
 }
 
@@ -1466,6 +1515,7 @@ mod tests {
         LoginNewAccount,
         SetProject(String),
         CreateProject(String),
+        EnterProjectId,
         EnableApis(Vec<String>),
         NoSelection,
     }
@@ -1483,6 +1533,7 @@ mod tests {
             Some(item) if item.label.starts_with('➕') => {
                 SetupAction::CreateProject(String::new())
             }
+            Some(item) if item.label.starts_with('⌨') => SetupAction::EnterProjectId,
             Some(item) => SetupAction::SetProject(item.label.clone()),
             None => SetupAction::NoSelection,
         }
@@ -1674,6 +1725,20 @@ mod tests {
         assert_eq!(
             resolve_project_selection(&items),
             SetupAction::CreateProject(String::new())
+        );
+    }
+
+    #[test]
+    fn test_project_select_enter_manually() {
+        let mut items = make_items(&[
+            "➕ Create new project",
+            "⌨ Enter project ID manually",
+            "existing",
+        ]);
+        items[1].selected = true;
+        assert_eq!(
+            resolve_project_selection(&items),
+            SetupAction::EnterProjectId
         );
     }
 
@@ -1961,5 +2026,15 @@ mod tests {
             .map(|(api, err)| json!({"api": api, "error": err}))
             .collect();
         assert!(json_failed.is_empty());
+    }
+
+    #[test]
+    fn gcloud_bin_returns_platform_appropriate_name() {
+        let bin = gcloud_bin();
+        if cfg!(windows) {
+            assert_eq!(bin, "gcloud.cmd");
+        } else {
+            assert_eq!(bin, "gcloud");
+        }
     }
 }

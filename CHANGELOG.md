@@ -1,5 +1,139 @@
 # @googleworkspace/cli
 
+## 0.4.4
+
+### Patch Changes
+
+- e1e08eb: Fix highlight color on light terminal themes by using reverse video instead of a dark-gray background
+
+## 0.4.3
+
+### Patch Changes
+
+- fc6bc95: Exclude Workspace-admin-only scopes from the "Recommended" scope preset.
+
+  Scopes that require Google Workspace domain-admin access (`apps.*`,
+  `cloud-identity.*`, `ediscovery`, `directory.readonly`, `groups`) now return
+  `400 invalid_scope` when used by personal `@gmail.com` accounts. These scopes
+  are no longer included in the "Recommended" template, preventing login failures
+  for non-Workspace users.
+
+  Workspace admins can still select these scopes manually via the "Full Access"
+  template or by picking them individually in the scope picker.
+
+  Adds a new `is_workspace_admin_scope()` helper (mirroring the existing
+  `is_app_only_scope()`) that centralises this detection logic.
+
+- 2aa6084: docs: Comprehensive README overhaul addressing user feedback.
+
+  Added a Prerequisites section prior to the Quick Start to highlight the optional `gcloud` dependency.
+  Expanded the Authentication section with a decision matrix to help users choose the correct authentication path.
+  Added prominent warnings about OAuth "testing mode" limitations (the 25-scope cap) and the strict requirement to explicitly add the authorizing account as a "Test user" (#130).
+  Added a dedicated Troubleshooting section detailing fixes for common OAuth consent errors, "Access blocked" issues, and `redirect_uri_mismatch` failures.
+  Included shell escaping examples for Google Sheets A1 notation (`!`).
+  Clarified the `npm` installation rationale and added explicit links to pre-built native binaries on GitHub Releases.
+
+## 0.4.2
+
+### Patch Changes
+
+- d3e90e4: fix: use ~/.config/gws on all platforms for consistent config path
+
+  Previously used `dirs::config_dir()` which resolves to different paths per OS
+  (e.g. ~/Library/Application Support/gws on macOS, %APPDATA%\gws on Windows),
+  contradicting the documented ~/.config/gws/ path. Now uses ~/.config/gws/
+  everywhere with a fallback to the legacy OS-specific path for existing installs.
+
+## 0.4.1
+
+### Patch Changes
+
+- dbda001: Add "Enter project ID manually" option to project picker in `gws auth setup`.
+
+  Users with large numbers of GCP projects often hit the 10-second listing timeout.
+  The picker now includes a "⌨ Enter project ID manually" item so users can type a
+  known project ID directly without waiting for `gcloud projects list` to complete.
+
+## 0.4.0
+
+### Minor Changes
+
+- 87e4bb1: Add Linux ARM64 build targets (aarch64-unknown-linux-gnu and aarch64-unknown-linux-musl) to cargo-dist, enabling prebuilt binaries for ARM64 Linux users via npm, the shell installer, and GitHub Releases.
+- d1825f9: ### Multi-Account Support
+
+  Add support for managing multiple Google accounts with per-account credential storage.
+
+  **New features:**
+
+  - `--account EMAIL` global flag available on every command
+  - `GOOGLE_WORKSPACE_CLI_ACCOUNT` environment variable as fallback
+  - `gws auth login --account EMAIL` — associates credentials with a specific account
+  - `gws auth list` — lists all registered accounts
+  - `gws auth default EMAIL` — sets the default account
+  - `gws auth logout --account EMAIL` — removes a specific account
+  - `login_hint` in OAuth URL for automatic account pre-selection in browser
+  - Email validation via Google userinfo endpoint after OAuth flow
+
+  **Breaking change:** Existing users must run `gws auth login` again after upgrading. The credential storage format has changed from a single `credentials.enc` to per-account files (`credentials.<b64-email>.enc`) with an `accounts.json` registry.
+
+### Patch Changes
+
+- a6994ad: Filter out `apps.alerts` scopes from user OAuth login flow since they require service account with domain-wide delegation
+- 1ad4f34: fix: replace unwrap() calls with proper error handling in MCP server
+
+  Replaced four `unwrap()` calls in `mcp_server.rs` that could panic the MCP
+  server process with graceful error handling. Also added a warning log when
+  authentication silently falls back to unauthenticated mode.
+
+- a1be14f: fix: drain stdout pipe to prevent project listing timeout during auth setup
+
+  Fixed `gws auth setup` timing out at step 3 (GCP project selection) for users
+  with many projects. The `gcloud projects list` stdout pipe was only read after
+  the child process exited, causing a deadlock when output exceeded the OS pipe
+  buffer (~64 KB). Stdout is now drained in a background thread to prevent the
+  pipe from filling up.
+
+- 364542b: fix: reject DEL character (0x7F) in input validation
+
+  The `reject_control_chars` helper rejected bytes 0x00–0x1F but allowed
+  the DEL character (0x7F), which is also an ASCII control character. This
+  could allow malformed input from LLM agents to bypass validation.
+
+- 75cec1b: Fix URL template expansion so media upload endpoints substitute path parameters and avoid iterative replacement side effects.
+- ed409e3: Harden URL and path construction across helper modules (gmail/watch, modelarmor, discovery)
+- 263a8e5: fix: use gcloud.cmd on Windows and show platform-correct config paths
+
+  On Windows, gcloud is installed as `gcloud.cmd` which Rust's `Command`
+  cannot find without the extension. Also replaced hardcoded `~/.config/gws/`
+  in error messages with the actual platform-resolved path.
+
+## 0.3.5
+
+### Patch Changes
+
+- 4bca693: fix: credential masking panic and silent token write errors
+
+  Fixed `gws auth export` masking which panicked on short strings and showed
+  the entire secret instead of masking it. Also fixed silent token cache write
+  failures in `save_to_disk` that returned `Ok(())` even when the write failed.
+
+- f84ce37: Fix URL template path expansion to safely encode path parameters, including
+  Sheets `range` values with Unicode and reserved characters. `{var}` expansions
+  now encode as a path segment, `{+var}` preserves slashes while encoding each
+  segment, and invalid path parameter/template mismatches fail fast.
+- eb0347a: fix: correct author email typo in package.json
+- 70d0cdd: Fix Slides presentations.get failure caused by flatPath placeholder mismatch
+
+  When a Discovery Document's `flatPath` uses placeholder names that don't match
+  the method's parameter names (e.g., `{presentationsId}` vs `presentationId`),
+  `build_url` now falls back to the `path` field which uses RFC 6570 operators
+  that resolve correctly.
+
+  Fixes #118
+
+- 37ab483: Add flake.nix for nix & NixOS installs
+- 1991d53: Add prominent disclaimer that this is not an officially supported Google product to README, --help, and --version output
+
 ## 0.3.4
 
 ### Patch Changes
